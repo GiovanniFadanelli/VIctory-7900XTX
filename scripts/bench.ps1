@@ -51,7 +51,7 @@ $p = Start-Process powershell -ArgumentList '-NoProfile', '-EncodedCommand', $en
 
 # Every process under the one started here, by parent id.
 function Get-Tree([int]$root) {
-    $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate
+    $all = Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate -OperationTimeoutSec 10 -ErrorAction SilentlyContinue
     $ids = @($root); $grew = $true
     while ($grew) {
         $more = $all | Where-Object { $ids -contains $_.ParentProcessId -and $ids -notcontains $_.ProcessId -and $_.CreationDate -ge $started.AddSeconds(-2) }
@@ -102,6 +102,7 @@ $line = [pscustomobject]$summary
 $results = Join-Path $Out 'results.csv'
 $line | Export-Csv -Append -NoTypeInformation $results
 $line | Format-List | Out-String | Write-Host
+
 
 
 

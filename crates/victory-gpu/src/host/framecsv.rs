@@ -116,6 +116,45 @@ pub(crate) fn presented() {
 }
 
 #[cfg(test)]
+mod piece_tests {
+    use super::super::refresh_pieces;
+
+    /// A long span is cut on the piece's multiples; short spans and the
+    /// order stay; every byte is in exactly one piece (no write is lost to a
+    /// gap, none refreshed twice).
+    #[test]
+    fn long_refresh_spans_are_cut_on_piece_boundaries_covering_every_byte() {
+        const P: usize = 1 << 20;
+        let spans = vec![
+            ('a', 0x10_0100, 0x10_0200),           // short: as it is
+            ('b', 0x20_0000 + 0x300, 0x20_0000 + 3 * P + 0x40), // long, unaligned ends
+            ('c', 4 * P, 6 * P),                   // long, aligned
+        ];
+        let pieces = refresh_pieces(spans.clone(), P);
+        assert_eq!(
+            pieces,
+            vec![
+                ('a', 0x10_0100, 0x10_0200),
+                ('b', 0x20_0300, 0x30_0000),
+                ('b', 0x30_0000, 0x40_0000),
+                ('b', 0x40_0000, 0x50_0000),
+                ('b', 0x50_0000, 0x50_0040),
+                ('c', 4 * P, 5 * P),
+                ('c', 5 * P, 6 * P),
+            ],
+            "long spans were not cut on the piece's boundaries"
+        );
+        for (what, from, to) in &spans {
+            let mine: Vec<_> = pieces.iter().filter(|p| p.0 == *what).collect();
+            assert_eq!(mine.first().map(|p| p.1), Some(*from));
+            assert_eq!(mine.last().map(|p| p.2), Some(*to));
+            assert!(mine.windows(2).all(|w| w[0].2 == w[1].1), "a gap or an overlap in {what}");
+        }
+        assert_eq!(refresh_pieces(spans.clone(), 0), spans, "0 must leave spans as they are");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{HEADER, Totals, line};
 

@@ -49,12 +49,16 @@ $patterns = [ordered]@{
     ref_check        = 'threads. ([\d.]+) ms asking whether a span'
     ref_update       = 'nothing and ([\d.]+) ms updating the others'
     ref_spans        = 'the others; ([\d.]+) spans in'
+    ref_longest      = 'the longest update of each flush summed ([\d.]+) ms'
+    ref_largest_mb   = 'the largest span of each flush summed ([\d.]+) MB'
     card_idle_behind = 'ms \(the card about \d+% busy by this count\), ([\d.]+) ms of that while the submitting thread'
 }
 $all = @()
 foreach ($file in $Log) {
     $block = @{}
-    foreach ($line in [IO.File]::ReadLines((Resolve-Path $file))) {
+    $stream = [IO.File]::Open((Resolve-Path $file), 'Open', 'Read', 'ReadWrite')
+    $reader = New-Object IO.StreamReader($stream)
+    while ($null -ne ($line = $reader.ReadLine())) {
         foreach ($k in $patterns.Keys) {
             $m = [regex]::Match($line, $patterns[$k])
             if ($m.Success -and -not $block.ContainsKey($k)) { $block[$k] = [double]::Parse($m.Groups[1].Value, [Globalization.CultureInfo]::InvariantCulture) }
@@ -64,10 +68,13 @@ foreach ($file in $Log) {
             $block = @{}
         }
     }
+    $reader.Dispose()
 }
 "blocks: $($all.Count)"
 foreach ($k in $patterns.Keys) {
     $xs = @($all | Where-Object { $_.ContainsKey($k) } | ForEach-Object { $_[$k] })
     if ($xs.Count) { '{0,-18} {1,9:N2}  (n {2})' -f $k, (($xs | Measure-Object -Average).Average), $xs.Count }
 }
+
+
 

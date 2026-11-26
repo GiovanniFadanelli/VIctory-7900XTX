@@ -890,7 +890,27 @@ fn untally_preparing(i: usize, v: u64, order: Ordering) {
 /// updating the others; the spans; the host copies they fell in, counted
 /// once a flush; and the flushes' wall-clock nanoseconds.
 #[cfg(feature = "diagnostics")]
-pub(crate) static REFRESH_SPLIT: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+pub(crate) static REFRESH_SPLIT: [std::sync::atomic::AtomicU64; 7] = [const { std::sync::atomic::AtomicU64::new(0) }; 7];
+
+/// Of the flush running now: its longest update (nanoseconds) and the
+/// largest span updated (bytes); added to [`REFRESH_SPLIT`] 5 and 6 at its end.
+#[cfg(feature = "diagnostics")]
+static FLUSH_LONGEST: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
+/// An update of `bytes` that took `ns`, for [`FLUSH_LONGEST`].
+#[cfg(feature = "diagnostics")]
+fn note_update(ns: u64, bytes: usize) {
+    FLUSH_LONGEST[0].fetch_max(ns, Ordering::Relaxed);
+    FLUSH_LONGEST[1].fetch_max(bytes as u64, Ordering::Relaxed);
+}
+
+/// The end of a flush: its [`FLUSH_LONGEST`] into [`REFRESH_SPLIT`].
+#[cfg(feature = "diagnostics")]
+fn flush_longest_done() {
+    for i in 0..2 {
+        REFRESH_SPLIT[5 + i].fetch_add(FLUSH_LONGEST[i].swap(0, Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
 
 /// [`REFRESH_SPLIT`] of the shadows `spans` fall in, once a flush.
 #[cfg(feature = "diagnostics")]
@@ -903,6 +923,43 @@ fn note_refresh_copies<'a>(spans: impl Iterator<Item = &'a std::sync::Arc<crate:
     }
     REFRESH_SPLIT[2].fetch_add(n, Ordering::Relaxed);
     REFRESH_SPLIT[3].fetch_add(seen.len() as u64, Ordering::Relaxed);
+}
+
+/// `VICTORY_REFRESH_PIECE_KB` (0, off): refresh spans longer than this are
+/// cut into pieces of it, on its boundaries, before they are spread over
+/// the threads. A flush's one big span (about 17 MB, mostly unchanged) was
+/// updated by one thread while the others waited: the longest update was
+/// 5.0 of the flushes' 11.7 ms a frame (run probe2). A power of two of at
+/// least 64 KiB (a guard block), so no piece shares a block with another.
+fn refresh_piece() -> usize {
+    static PIECE: OnceLock<usize> = OnceLock::new();
+    *PIECE.get_or_init(|| {
+        let kb: usize = std::env::var("VICTORY_REFRESH_PIECE_KB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        if kb == 0 { 0 } else { (kb.max(64) << 10).next_power_of_two() }
+    })
+}
+
+/// `spans` (what, from, to) with every span longer than `piece` cut on the
+/// multiples of `piece` (a power of two; 0 leaves them as they are). The
+/// pieces cover the same bytes as the spans, in order, none twice.
+fn refresh_pieces<T: Clone>(spans: Vec<(T, usize, usize)>, piece: usize) -> Vec<(T, usize, usize)> {
+    if piece == 0 || spans.iter().all(|s| s.2 - s.1 <= piece) {
+        return spans;
+    }
+    let mut out = Vec::with_capacity(spans.len() + 16);
+    for (what, from, to) in spans {
+        if to - from <= piece {
+            out.push((what, from, to));
+            continue;
+        }
+        let mut at = from;
+        while at < to {
+            let end = ((at & !(piece - 1)) + piece).min(to);
+            out.push((what.clone(), at, end));
+            at = end;
+        }
+    }
+    out
 }
 
 /// Times `f` into counter `i` of [`REFRESH_SPLIT`] (diagnostics builds).
@@ -7826,12 +7883,15 @@ fn split_line(frames: f64) {
         let r: Vec<f64> = REFRESH_SPLIT.iter().map(|n| n.swap(0, Ordering::Relaxed) as f64 / frames).collect();
         tracing::info!(
             "refreshes on several threads per frame: {:.1} ms wall, threads' {:.1} ms asking whether a span is known to copy nothing and {:.1} ms \
-             updating the others; {:.0} spans in {:.0} host copies (counted once a flush)",
+             updating the others; {:.0} spans in {:.0} host copies (counted once a flush); the longest update of each flush summed {:.1} ms, \
+             the largest span of each flush summed {:.1} MB",
             r[4] / 1e6,
             r[0] / 1e6,
             r[1] / 1e6,
             r[2],
             r[3],
+            r[5] / 1e6,
+            r[6] / 1e6,
         );
     }
     tracing::info!(
@@ -8532,6 +8592,7 @@ impl Batch {
         }
         #[cfg(feature = "diagnostics")]
         FLUSHES[3].fetch_add(spans.len() as u64, Ordering::Relaxed);
+        let spans = refresh_pieces(spans, refresh_piece());
         #[cfg(feature = "diagnostics")]
         note_refresh_copies(spans.iter().map(|s| &s.0));
         #[cfg(feature = "diagnostics")]
@@ -8548,10 +8609,19 @@ impl Batch {
                 FLUSHES[2].fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            refresh_timed(1, || Self::update(shadow, *from, *to));
+            {
+                #[cfg(feature = "diagnostics")]
+                let began = std::time::Instant::now();
+                refresh_timed(1, || Self::update(shadow, *from, *to));
+                #[cfg(feature = "diagnostics")]
+                note_update(began.elapsed().as_nanos() as u64, *to - *from);
+            }
         });
         #[cfg(feature = "diagnostics")]
-        REFRESH_SPLIT[4].fetch_add(wall.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        {
+            REFRESH_SPLIT[4].fetch_add(wall.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            flush_longest_done();
+        }
         if ahead {
             crate::watch::ask_ahead_done();
         }
@@ -8716,7 +8786,7 @@ impl Batch {
             FLUSHES[3].fetch_add(self.refreshes.len() as u64, Ordering::Relaxed);
             if light {
                 // A number to a free thread, not a job to each copy.
-                let refreshes = std::mem::take(&mut self.refreshes);
+                let refreshes = refresh_pieces(std::mem::take(&mut self.refreshes), refresh_piece());
                 #[cfg(feature = "diagnostics")]
                 note_refresh_copies(refreshes.iter().map(|s| &s.0));
                 #[cfg(feature = "diagnostics")]
@@ -8728,10 +8798,19 @@ impl Batch {
                         FLUSHES[2].fetch_add(1, Ordering::Relaxed);
                         return;
                     }
-                    refresh_timed(1, || Self::update(shadow, *from, *to));
+                    {
+                #[cfg(feature = "diagnostics")]
+                let began = std::time::Instant::now();
+                refresh_timed(1, || Self::update(shadow, *from, *to));
+                #[cfg(feature = "diagnostics")]
+                note_update(began.elapsed().as_nanos() as u64, *to - *from);
+            }
                 });
                 #[cfg(feature = "diagnostics")]
-                REFRESH_SPLIT[4].fetch_add(wall.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                {
+            REFRESH_SPLIT[4].fetch_add(wall.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            flush_longest_done();
+        }
             } else {
                 let jobs: Vec<Box<dyn FnOnce() + Send>> = self
                     .refreshes
