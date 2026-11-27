@@ -5535,44 +5535,7 @@ fn root_window(address: u64, end: u64) -> (u64, u64) {
     if most <= len {
         return (cell, len);
     }
-    root_extent(cell, len, recent_reach(cell + len, cell + most), most)
-}
-
-/// How long a [`committed_reach`] answer is used again, in milliseconds
-/// (`VICTORY_ROOT_REACH_MS`, 1000; 0: asked every time).
-///
-/// Every ask without a length asked Windows anew, from the threads that
-/// translate list calls, while the title maps and unmaps its pages: 680
-/// queries in 8 frames of driving took 362 ms of those threads (65 us to
-/// 5.7 ms each; 330,000 regions in the address space). What the title
-/// commits around a root view changes far less often than it is asked.
-fn root_reach_ms() -> u64 {
-    static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *MS.get_or_init(|| std::env::var("VICTORY_ROOT_REACH_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1000))
-}
-
-/// [`committed_reach`], answered from what was found for the same range in
-/// the last [`root_reach_ms`].
-fn recent_reach(from: u64, limit: u64) -> u64 {
-    type Found = std::collections::HashMap<(u64, u64), (u64, std::time::Instant)>;
-    static FOUND: std::sync::LazyLock<std::sync::RwLock<Found>> = std::sync::LazyLock::new(Default::default);
-    let ms = root_reach_ms();
-    if ms == 0 {
-        return committed_reach(from, limit);
-    }
-    let fresh = std::time::Duration::from_millis(ms);
-    if let Some(&(reach, at)) = FOUND.read().unwrap_or_else(|e| e.into_inner()).get(&(from, limit))
-        && at.elapsed() < fresh
-    {
-        return reach;
-    }
-    let reach = committed_reach(from, limit);
-    let mut found = FOUND.write().unwrap_or_else(|e| e.into_inner());
-    if found.len() >= 4096 {
-        found.retain(|_, (_, at)| at.elapsed() < fresh);
-    }
-    found.insert((from, limit), (reach, std::time::Instant::now()));
-    reach
+    root_extent(cell, len, committed_reach(cell + len, cell + most), most)
 }
 
 /// The window from `cell` of at least `len` bytes that reaches `reach`,
@@ -6022,16 +5985,47 @@ mod window_tests {
         assert_eq!(super::root_window(cell + 0x100, cell + 0x104), (cell, 12 << 20), "the root view's window is its cell alone");
     }
 
-    /// What was found committed around a root view is used again within
-    /// `VICTORY_ROOT_REACH_MS` (=0: asked anew every time).
+    /// A decommit without a mapping notice still shortens the next root window.
     #[test]
-    fn a_root_view_reach_is_used_again_within_its_time() {
+    fn a_root_view_rechecks_its_reach_after_decommit() {
         use windows_sys::Win32::System::Memory::{MEM_DECOMMIT, VirtualFree};
         let cell = committed_cell(12 << 20);
         assert_eq!(super::root_window(cell, cell + 4), (cell, 12 << 20));
         // SAFETY: the upper 8 MiB of our own commitment, nothing reads it.
         assert_ne!(unsafe { VirtualFree((cell + WINDOW) as *mut _, (8 << 20) as usize, MEM_DECOMMIT) }, 0);
-        assert_eq!(super::root_window(cell, cell + 4), (cell, 12 << 20), "the reach was asked of Windows again");
+        assert_eq!(super::root_window(cell, cell + 4), (cell, WINDOW), "the reach still includes decommitted pages");
+    }
+
+    /// The title unmaps the memory after a root view's cell and maps less
+    /// at the same address: the window is asked again at once, and does not
+    /// reach into the memory no longer there.
+    #[test]
+    fn a_remap_after_a_root_view_ends_its_window_where_the_new_memory_does() {
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, MEM_DECOMMIT, PAGE_READWRITE, VirtualAlloc, VirtualFree};
+        let cell = committed_cell(12 << 20);
+        assert_eq!(super::root_window(cell, cell + 4), (cell, 12 << 20));
+        let after = (cell + WINDOW) as usize;
+        crate::title_memory_unmapping(after, 8 << 20);
+        // SAFETY: the upper 8 MiB of our own commitment, nothing reads it.
+        assert_ne!(unsafe { VirtualFree(after as *mut _, 8 << 20, MEM_DECOMMIT) }, 0);
+        // SAFETY: inside our own reservation.
+        assert!(!unsafe { VirtualAlloc(after as *const _, 4 << 20, MEM_COMMIT, PAGE_READWRITE) }.is_null());
+        crate::title_memory_remapped(after, 4 << 20);
+        assert_eq!(super::root_window(cell, cell + 4), (cell, 8 << 20), "the window reaches past the remapped memory");
+    }
+
+    /// The title commits more at the address after a root view's cell: the
+    /// next window includes the newly committed pages.
+    #[test]
+    fn a_commit_after_a_root_view_widens_its_window_at_once() {
+        use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_READWRITE, VirtualAlloc};
+        let cell = committed_cell(WINDOW);
+        assert_eq!(super::root_window(cell, cell + 4), (cell, WINDOW));
+        let after = (cell + WINDOW) as usize;
+        // SAFETY: inside our own reservation.
+        assert!(!unsafe { VirtualAlloc(after as *const _, 8 << 20, MEM_COMMIT, PAGE_READWRITE) }.is_null());
+        crate::title_memory_allocated(after, 8 << 20);
+        assert_eq!(super::root_window(cell, cell + 4), (cell, 12 << 20), "the window kept the reach from before the commit");
     }
 }
 
