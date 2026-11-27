@@ -276,7 +276,7 @@ pub(crate) fn alias(list: &HostList, placed: This, source: This) -> bool {
     // the list has used its first use already: only a copy from the same card-written
     // source satisfies this read (before: the copy was skipped and the shader read the
     // uploaded bytes, zero where the card wrote packed light).
-    let new_source = list.alias_source_changed(&to, &from);
+    let new_source = list.alias_source_changed(to, from);
     // The source's first use in the list records nothing (its prelude
     // brings it to the state); a use in another way since the last copy
     // shows as a change of state.
