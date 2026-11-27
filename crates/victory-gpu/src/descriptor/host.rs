@@ -1299,13 +1299,29 @@ fn view_stride(view: &View) -> Option<u32> {
     })
 }
 
-/// What else the table of strides says of a typed buffer view of an integer
-/// format (`victory_shader::emit::VIEW_INTEGER`); 0 for any other view.
+/// What else the table of strides says of a typed buffer view or an image
+/// view of an integer format (`victory_shader::emit::VIEW_INTEGER`): d16
+/// accesses through it pass bits. 0 for any other view.
 fn view_kind(view: &View) -> u32 {
     use victory_shader::emit::{VIEW_INTEGER, VIEW_SIGNED};
-    match view_elements(view) {
-        Some((0, false, 3 | 7 | 12 | 17 | 25 | 30 | 36 | 42 | 50 | 57 | 62)) => VIEW_INTEGER,
-        Some((0, false, 4 | 8 | 14 | 18 | 32 | 38 | 43 | 52 | 59 | 64)) => VIEW_INTEGER | VIEW_SIGNED,
+    let format = match view_elements(view) {
+        // A typed buffer view: its format. Raw and structured ones have none.
+        Some((0, false, format)) => format,
+        Some(_) => return 0,
+        // An image view: the format its description names, else its
+        // resource's (`View::Placed` is a buffer's or a texture's).
+        None => match view {
+            View::Shader(_, Some(d)) | View::Unordered(_, _, Some(d)) => d[0],
+            View::Placed(_, _, d) => d[0],
+            View::Shader(r, None) | View::Unordered(r, _, None) => {
+                crate::resource::own_format(*r as crate::object::This).unwrap_or(0)
+            }
+            _ => return 0,
+        },
+    };
+    match format {
+        3 | 7 | 12 | 17 | 25 | 30 | 36 | 42 | 50 | 57 | 62 => VIEW_INTEGER,
+        4 | 8 | 14 | 18 | 32 | 38 | 43 | 52 | 59 | 64 => VIEW_INTEGER | VIEW_SIGNED,
         _ => 0,
     }
 }
@@ -2797,6 +2813,16 @@ impl HostHeap {
         let kept = make_twinned(view, self.at(index), self.twin(index));
         if kept.is_none() {
             null_for(view, self.at(index));
+        }
+        // Its word in the table of strides too: shaders read the format kind
+        // of the image views of fresh tables there (`SLOT_KINDS`).
+        if let Some((_, _, data)) = &self.strides
+            && index < victory_shader::emit::SLOT_STRIDES_COUNT
+        {
+            let word = view_stride(view).unwrap_or(0) | view_kind(view);
+            // SAFETY: inside the mapping; shaders read it while we write (a
+            // dword, either value is one the slot had).
+            unsafe { (*data as *mut u32).add(index as usize).write_volatile(word) };
         }
         self.put(index);
         self.twin_made(index, kept.is_some() && twinned(view));
@@ -5296,6 +5322,24 @@ mod tests {
         assert_eq!(view_kind(&uav(39, 0, 1)), 0, "raw");
         assert_eq!(view_kind(&uav(0, 16, 0)), 0, "structured");
         assert_eq!(view_stride(&uav(12, 0, 0)), Some(8));
+    }
+
+    /// Image views of integer formats are marked too (d16 image loads read
+    /// it, `SLOT_KINDS`), with no stride; float and normalized ones are not.
+    #[test]
+    fn integer_image_views_are_marked_in_the_table_of_strides() {
+        use victory_shader::emit::{VIEW_INTEGER, VIEW_SIGNED};
+        // Format, dimension (2D texture), component mapping.
+        let srv = |format| View::Shader(0, Some([format, 4, 0x1688, 0, 1, 0, 0, 0, 0, 0]));
+        let uav = |format| View::Unordered(0, 0, Some([format, 4, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(view_kind(&srv(57)), VIEW_INTEGER, "R16_UINT");
+        assert_eq!(view_kind(&srv(59)), VIEW_INTEGER | VIEW_SIGNED, "R16_SINT");
+        assert_eq!(view_kind(&uav(42)), VIEW_INTEGER, "R32_UINT");
+        assert_eq!(view_kind(&srv(41)), 0, "R32_FLOAT");
+        assert_eq!(view_kind(&srv(54)), 0, "R16_FLOAT");
+        assert_eq!(view_kind(&srv(58)), 0, "R16_SNORM");
+        assert_eq!(view_stride(&srv(57)), None, "an image view has no stride");
+        assert_eq!(view_kind(&View::Shader(0, None)), 0, "no resource");
     }
 
     /// What may stand for a texture that is not there yet: one of its kind in

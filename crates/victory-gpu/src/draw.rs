@@ -1712,6 +1712,22 @@ impl State {
                         }
                         continue;
                     }
+                    if srv && slot == victory_shader::emit::SLOT_KINDS {
+                        // Ours: the same table, read for the format kind of
+                        // image views (d16 loads), with no buffer made ready.
+                        match self.slot_kinds(list) {
+                            // SAFETY: an open list; the list holds the table.
+                            Some(gpu) => unsafe {
+                                if compute {
+                                    l.SetComputeRootShaderResourceView(param, gpu);
+                                } else {
+                                    l.SetGraphicsRootShaderResourceView(param, gpu);
+                                }
+                            },
+                            None => once!("a shader reads the format kinds of a view heap that is not set"),
+                        }
+                        continue;
+                    }
                     if srv && slot == victory_shader::emit::SLOT_STRIDES {
                         // Ours, not the title's: the shader picks buffers
                         // from the view heap by an index it computes.
@@ -2007,6 +2023,29 @@ impl State {
             }
         }
         true
+    }
+
+    /// For a shader that reads the format kind of image views by heap slot
+    /// ([`victory_shader::emit::SLOT_KINDS`]): the GPU address of the bound
+    /// view heap's table of strides, which holds those kinds too. Unlike
+    /// [`State::heap_buffers`], no buffer view is made ready for it.
+    fn slot_kinds(&self, list: &HostList) -> Option<u64> {
+        let heap = self
+            .heaps
+            .iter()
+            .filter(|&&h| h != 0)
+            .map(|&h| crate::descriptor::heap(h as This))
+            .find(|h| !h.samplers())?;
+        let host = heap.host()?;
+        let gpu = host.strides_gpu()?;
+        // The list may outlive the title's heap object, which owns the table:
+        // held once per list (the key tagged as `heap_buffers` tags its own).
+        if list.first_use(gpu as usize | 2)
+            && let Some(buffer) = host.strides_buffer()
+        {
+            list.keep(buffer);
+        }
+        Some(gpu)
     }
 
     /// For a shader that picks buffers from the view heap by an index it

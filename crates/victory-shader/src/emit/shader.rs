@@ -26,9 +26,16 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 pub const SLOT_STRIDES: u8 = 255;
 /// The bits of a [`SLOT_STRIDES`] dword that hold the stride.
 pub const VIEW_STRIDE_BITS: u32 = (1 << 30) - 1;
-/// In a [`SLOT_STRIDES`] dword: a typed buffer view of an integer format
-/// (`UINT` or `SINT`), whose 16-bit typed accesses (`_d16`) pass bits.
-/// (After VIctory 4243a96a.)
+/// The root SRV `t<SLOT_KINDS>` in [`ROOT_CBV_SPACE`]: the same table as
+/// [`SLOT_STRIDES`], read for the [`VIEW_INTEGER`] bit of the image view at a
+/// heap slot (whether a d16 image load passes bits or converts a float). Its
+/// own slot because binding [`SLOT_STRIDES`] also makes every buffer view of
+/// the heap ready, which a program that only reads images through its tables
+/// does not need.
+pub const SLOT_KINDS: u8 = 252;
+/// In a [`SLOT_STRIDES`] dword: a typed buffer view or an image view of an
+/// integer format (`UINT` or `SINT`), whose 16-bit typed accesses (`_d16`)
+/// pass bits. (After VIctory 4243a96a.)
 pub const VIEW_INTEGER: u32 = 1 << 31;
 /// With [`VIEW_INTEGER`]: a signed (`SINT`) format.
 pub const VIEW_SIGNED: u32 = 1 << 30;

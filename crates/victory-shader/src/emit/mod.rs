@@ -85,6 +85,8 @@ mod container;
 #[cfg(all(test, windows))]
 mod cube_lod_tests;
 #[cfg(all(test, windows))]
+mod d16_tests;
+#[cfg(all(test, windows))]
 mod diff_tests;
 #[cfg(all(test, windows))]
 mod intersect_tests;
@@ -121,7 +123,7 @@ pub use sampler::StaticSampler;
 pub use lower::{host_settings, set_host_max_wave, set_host_rdna, set_thread_max_wave};
 pub use rect::rect_list_gs;
 pub use shader::{
-    MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_MEMORY, SLOT_STRIDES,
+    MEMORY_FAULTS, MEMORY_PAGES, MEMORY_READ_ONLY, ROOT_CBV_SPACE, SAMPLER_SPACE, SLOT_FAULTS, SLOT_KINDS, SLOT_MEMORY, SLOT_STRIDES,
     SLOT_STRIDES_BYTES, SLOT_STRIDES_COUNT, VIEW_ADDRESSES, USER_DATA_SPACE, VIEW_INTEGER, VIEW_SIGNED, VIEW_STRIDE_BITS, USER_DISPATCH_THREADS_X, USER_MEMORY_BASE, USER_ROOT_ADDRESS, USER_VIEW_ADDRESS, USER_VIEW_BIAS,
     constants_raw, raw_views, set_raw_views, set_view_heap_limit, view_heap_limit,
 };
@@ -3362,31 +3364,5 @@ mod picture_fix_tests {
         } else {
             assert!(!guarded, "the colour export is NaN-guarded without VICTORY_NAN_GUARD=1:\n{text}");
         }
-    }
-
-    /// (Scarlett, `VICTORY_D16_BITS`) A d16 image load keeps the low 16 bits
-    /// of what an integer view returns (a value up to 0xFFFF, or from
-    /// 0xFFFF8000) instead of converting them as a float; =0: converted.
-    #[test]
-    fn a_d16_image_load_keeps_an_integer_views_bits() {
-        let words = [
-            0xBE82_0309, // s_mov_b32 s2, s9
-            0xBE83_0380, // s_mov_b32 s3, 0
-            0xF40C_0001,
-            0xFA00_0000, // s_load_dwordx8 s[0:7], s[2:3], null
-            0x7E0C_0280, // v_mov_b32 v6, 0
-            0xF000_1100,
-            0x8000_0D06, // image_load v13, v6, s[0:7] dmask:0x1 d16
-            0xBF8C_0000, // s_waitcnt 0
-            0xF800_180F,
-            0x0D0D_0D0D, // exp mrt0 v13, v13, v13, v13 done vm
-            0xBF81_0000, // s_endpgm
-        ];
-        let Some(text) = dumped(&words) else { return };
-        assert!(text.contains("legacyF32ToF16"), "the d16 load is not converted at all:\n{text}");
-        assert!(
-            text.contains("65535") && text.contains("-32769"),
-            "the d16 load's integer bits are converted as a float:\n{text}"
-        );
     }
 }

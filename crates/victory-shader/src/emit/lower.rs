@@ -7898,25 +7898,65 @@ impl<'a> Lower<'a> {
     }
 
     /// (Scarlett, `VICTORY_D16_BITS`) A d16 load's 16 bits from `x`, the 32-bit value a
-    /// float-typed image load returned. Through a view of an integer format the host passes
-    /// the integer's bits unconverted: a 16-bit unsigned (or non-negative signed) value is a
-    /// tiny denormal there (bits up to 0xFFFF), a negative signed one sign-extended (bits
-    /// from 0xFFFF8000), and the console's d16 load gives its low 16 bits; converting them as
-    /// a float gave 0 (or NaN). Every other value is converted to a half as before.
-    fn d16_bits(&mut self, x: V) -> V {
+    /// float-typed image load returned, `integer` whether the view is of an integer format
+    /// ([`Self::integer_image`]). Through such a view the host passes the integer's bits
+    /// unconverted (zero- or sign-extended) and the console's d16 load gives their low 16;
+    /// converting them as a float gave 0 (or NaN). Through any other view the float is
+    /// converted to a half as before.
+    ///
+    /// The view's format decides, not the value: 0xFFFF8000 is -32768 from an `R16_SINT`
+    /// view and a NaN from an `R32_FLOAT` one.
+    fn d16_bits(&mut self, x: V, integer: Option<V>) -> V {
         let c = self.cur;
         let i32t = self.s.t.i32;
         let half = self.s.op(c, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[x]);
-        if !d16_bits_on() {
+        let Some(integer) = integer else {
             return half;
-        }
+        };
         let bits = self.as_int(x);
-        let (top, neg) = (self.s.m.i32(0xFFFF), self.s.m.i32(0xFFFF_7FFF));
-        let small = self.s.m.cmp(c, pred::IULE, bits, top);
-        let negative = self.s.m.cmp(c, pred::IUGT, bits, neg);
-        let integer = self.s.m.bin(c, Bin::Or, small, negative);
+        let top = self.s.m.i32(0xFFFF);
         let low = self.s.m.bin(c, Bin::And, bits, top);
         self.s.m.select(c, integer, low, half)
+    }
+
+    /// Whether the image view `src` names is one of an integer format, read from the
+    /// host's word for its heap slot ([`super::shader::SLOT_KINDS`]); `None` for a view
+    /// that is not in the heap (a root or constant descriptor), whose d16 loads stay
+    /// float conversions (`VICTORY_D16_BITS=0`: every view's do).
+    fn integer_image(&mut self, src: &Source) -> Result<Option<V>, Why> {
+        use super::shader::{SLOT_KINDS, SLOT_STRIDES_COUNT, VIEW_INTEGER};
+        if !d16_bits_on() {
+            return Ok(None);
+        }
+        let slot = match src {
+            Source::Built { .. } | Source::Constant(_) => return Ok(None),
+            Source::Phi { block, args } => self.descriptor_phi(*block, args, false, 8)?,
+            _ => self.lane_heap_index(src, false)?,
+        };
+        let c = self.cur;
+        // Inside the table whatever the index (as `slot_word`).
+        let last = self.s.m.i32(SLOT_STRIDES_COUNT - 1);
+        let i32t = self.s.t.i32;
+        let slot = self.s.op(c, "binary.i32", Attr::ReadNone, i32t, 40, &[slot, last]);
+        self.s.m.tag(slot, Tag::Clamp);
+        let two = self.s.m.i32(2);
+        let byte = self.s.m.bin(c, Bin::Shl, slot, two);
+        let h = self.s.root_srv_handle(SLOT_KINDS);
+        let iu = self.s.m.undef(self.s.t.i32);
+        let (mask, align) = (self.s.m.i8(1), self.s.m.i32(4));
+        let r = self.s.op(
+            c,
+            "rawBufferLoad.f32",
+            Attr::ReadOnly,
+            self.s.t.res_ret,
+            139,
+            &[h, byte, iu, mask, align],
+        );
+        let f = self.s.m.extract(c, r, 0);
+        let word = self.as_int(f);
+        let (bit, zero) = (self.s.m.i32(VIEW_INTEGER), self.s.m.i32(0));
+        let x = self.s.m.bin(c, Bin::And, word, bit);
+        Ok(Some(self.s.m.cmp(c, pred::NE, x, zero)))
     }
 
     /// The used-resource entry a descriptor loaded from a table falls in.
@@ -12254,6 +12294,8 @@ impl<'a> Lower<'a> {
         } else {
             (0..4).filter(|ch| dmask >> ch & 1 != 0).collect()
         };
+        // (Scarlett) Whether a d16 load or gather reads an integer view, once for all channels.
+        let integer = if *d16 && matches!(op, 66 | 73) { self.integer_image(src)? } else { None };
         let mut xs = Vec::new();
         for ch in channels {
             let x = match gathered {
@@ -12265,7 +12307,7 @@ impl<'a> Lower<'a> {
                 // load or gather through an integer view keeps its 16 bits ([`Self::d16_bits`]).
                 // shortcut: samples are always floats.
                 if matches!(op, 66 | 73) {
-                    self.d16_bits(x)
+                    self.d16_bits(x, integer)
                 } else {
                     let i32t = self.s.t.i32;
                     self.s

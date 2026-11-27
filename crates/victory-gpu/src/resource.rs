@@ -2682,6 +2682,12 @@ pub(crate) fn texture_memory(this: This) -> Option<(*const u8, ResourceDesc)> {
 }
 
 /// A buffer's host memory and size; `None` for textures.
+/// The host format of the resource `this` (null: none), as a view of the whole
+/// resource with no description of its own names it.
+pub(crate) fn own_format(this: This) -> Option<u32> {
+    (!this.is_null()).then(|| pc_format(resource(this).desc.format))
+}
+
 pub(crate) fn buffer_bytes(this: This) -> Option<(*mut u8, u64)> {
     if this.is_null() {
         return None;
