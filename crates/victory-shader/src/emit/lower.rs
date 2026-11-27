@@ -1732,10 +1732,17 @@ fn d16_bits_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_D16_BITS").is_none_or(|v| v != "0"))
 }
 
-/// (Neptune 25fbf69, Scarlett) `VICTORY_NAN_GUARD` (on unless `0`).
+/// (Neptune 25fbf69, Scarlett) `VICTORY_NAN_GUARD=1`, a diagnostic (off by default):
+/// RDNA exports a NaN or an infinity as it is, and the guard would hide where it came from.
 fn nan_guard_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_NAN_GUARD").is_none_or(|v| v != "0"))
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_NAN_GUARD").is_some_and(|v| v == "1");
+        if on {
+            eprintln!("VICTORY_NAN_GUARD=1: float colour exports have NaN made 0 and infinity +-65504 (a diagnostic, not RDNA's export)");
+        }
+        on
+    })
 }
 
 /// The pixel inputs packing two 16-bit rows per dword, as (first row,
@@ -7867,7 +7874,8 @@ impl<'a> Lower<'a> {
 
     /// (Neptune 25fbf69, Scarlett) A float a pixel program exports to a colour target, with
     /// NaN made 0 and an infinity +-65504, so one bad pixel does not stay in a history the
-    /// title blends into each frame (glowing eyes, white shots).
+    /// title blends into each frame (glowing eyes, white shots). A diagnostic, off unless
+    /// `VICTORY_NAN_GUARD=1`: it masks a wrong value the translation should not make.
     fn nan_guard(&mut self, f: V) -> V {
         if !nan_guard_on() {
             return f;

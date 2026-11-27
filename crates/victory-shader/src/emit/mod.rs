@@ -3335,10 +3335,11 @@ mod picture_fix_tests {
     }
 
     /// (Neptune 25fbf69, `VICTORY_NAN_GUARD`) A float colour export is
-    /// tested for NaN and infinity (exponent all ones, 0x7F800000) and an
-    /// infinity made +-65504 (0x477FE000); =0: exported as it is.
+    /// exported as it is, as RDNA does. Only with `VICTORY_NAN_GUARD=1` (a
+    /// diagnostic) is it tested for NaN and infinity (exponent all ones,
+    /// 0x7F800000) and an infinity made +-65504 (0x477FE000).
     #[test]
-    fn a_float_colour_export_turns_nan_and_infinity_into_numbers() {
+    fn a_float_colour_export_is_guarded_only_with_the_switch() {
         // A texel, not a constant: a guard of a constant is folded away.
         let words = [
             0xBE82_0309, // s_mov_b32 s2, s9
@@ -3354,10 +3355,13 @@ mod picture_fix_tests {
             0xBF81_0000, // s_endpgm
         ];
         let Some(text) = dumped(&words) else { return };
-        assert!(
-            text.contains("2139095040") && text.contains("1199562752"),
-            "no NaN guard on the colour export:\n{text}"
-        );
+        let guarded = text.contains("2139095040") && text.contains("1199562752");
+        // What was asked for, read here and not from the rule under test.
+        if std::env::var_os("VICTORY_NAN_GUARD").is_some_and(|v| v == "1") {
+            assert!(guarded, "no NaN guard on the colour export with VICTORY_NAN_GUARD=1:\n{text}");
+        } else {
+            assert!(!guarded, "the colour export is NaN-guarded without VICTORY_NAN_GUARD=1:\n{text}");
+        }
     }
 
     /// (Scarlett, `VICTORY_D16_BITS`) A d16 image load keeps the low 16 bits
